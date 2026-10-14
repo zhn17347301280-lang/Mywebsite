@@ -1,0 +1,67 @@
+name: Deploy portfolio to Pages
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: pages
+  cancel-in-progress: false
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - name: Install image optimizer
+        run: python3 -m pip install Pillow==11.3.0
+      - name: Build web copy while preserving original images
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          from concurrent.futures import ThreadPoolExecutor
+          import shutil, subprocess
+          from PIL import Image, ImageOps
+          output = Path('_site')
+          output.mkdir()
+          files = subprocess.check_output(['git', 'ls-files', '-z']).decode().split('\0')
+          def build(name):
+              if not name or name.startswith('.') or name.endswith('.log'):
+                  return
+              source = Path(name)
+              target = output / source
+              target.parent.mkdir(parents=True, exist_ok=True)
+              if source.suffix.lower() in ('.jpg', '.jpeg'):
+                  with Image.open(source) as original:
+                      profile = original.info.get('icc_profile')
+                      image = ImageOps.exif_transpose(original).convert('RGB')
+                      image.thumbnail((2560, 100000), Image.Resampling.LANCZOS)
+                      image.save(target, 'JPEG', quality=85, optimize=True, progressive=True, icc_profile=profile)
+                  if target.stat().st_size >= source.stat().st_size:
+                      shutil.copy2(source, target)
+              else:
+                  shutil.copy2(source, target)
+              if source.suffix.lower() == '.html':
+                  text = target.read_text(encoding='utf-8')
+                  text = text.replace('https://github.com/ZHNHNN', 'https://github.com/zhn17347301280-lang')
+                  target.write_text(text, encoding='utf-8')
+          with ThreadPoolExecutor(max_workers=2) as pool:
+              list(pool.map(build, files))
+          (output / '.nojekyll').touch()
+          size = sum(p.stat().st_size for p in output.rglob('*') if p.is_file())
+          print(f'Published files: {size / 1024**2:.1f} MiB')
+          assert (output / 'index.html').is_file()
+          assert size < 950_000_000, 'Website exceeds Pages size limit'
+          PY
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5
